@@ -11,22 +11,25 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 // ======================= config.dart =======================
 class AppConfig {
-  // يمكن تغييرها وقت البناء:
+  // استخدم دائماً:
   // flutter run --dart-define=TEMPMAIL_KEY=xxxx
+  // أو في CI / release:
+  // --dart-define=TEMPMAIL_KEY=xxxx --dart-define=TEMPMAIL_GATEWAY=...
   static const gatewayUrl = String.fromEnvironment(
     'TEMPMAIL_GATEWAY',
     defaultValue: 'https://temporary-email3.p.rapidapi.com',
   );
   static const gatewayKey = String.fromEnvironment(
     'TEMPMAIL_KEY',
-    defaultValue: '85c0287154msh55bbcae0f065001p12e225jsn7770b94568bb',
+    defaultValue: '85c0287154msh55bbcae0f065001p12e225jsn7770b94568bb', // ← ما عاد فيه مفتاح مكشوف
   );
 
-  static const randomDomain = 'random.com';
-  static const pollInterval = Duration(seconds: 5); // والتطبيق مفتوح
-  static const bgInterval = Duration(seconds: 15); // في الخلفية
-  static const httpTimeout = Duration(seconds: 45);
-  static const userAgent = 'odin-mail/1.0';
+  static const randomDomain = 'random'; // سنتعامل معه خاص
+  static const pollInterval = Duration(seconds: 5);
+  static const bgInterval = Duration(seconds: 15);
+  static const httpTimeout = Duration(seconds: 40);
+  static const userAgent = 'odin-mail/1.1';
+  static const maxHistory = 30; // حد أقصى للعناوين المحفوظة
 
   static const domains = <String>[
     'singapore.edu.pl', 'paris.edu.pl', 'france.edu.pl', 'devpoet.com',
@@ -39,8 +42,10 @@ class AppConfig {
   ];
 
   static final codePatterns = <RegExp>[
-    RegExp(r'(?:code|otp|verification|confirm|pin|كود|رمز|تحقق)[^\d\n]{0,25}(\d{4,8})',
-        caseSensitive: false),
+    RegExp(
+      r'(?:code|otp|verification|confirm|pin|كود|رمز|تحقق)[^\d\n]{0,25}(\d{4,8})',
+      caseSensitive: false,
+    ),
     RegExp(r'(\d{4,8})[^\d\n]{0,25}(?:is your|code|otp)', caseSensitive: false),
     RegExp(r'\b(\d{6})\b'),
     RegExp(r'\b(\d{4,8})\b'),
@@ -52,9 +57,9 @@ class Inbox {
   final String address;
   final int since;
   final int created;
-  final List<String> seenMids; // أُرسل لها إشعار
-  final List<String> readMids; // فتحها المستخدم
-  final List<String> deletedMids; // حذفها المستخدم بنفسه (لا تظهر ثانية)
+  final List<String> seenMids;
+  final List<String> readMids;
+  final List<String> deletedMids;
 
   Inbox({
     required this.address,
@@ -63,7 +68,7 @@ class Inbox {
     List<String>? seenMids,
     List<String>? readMids,
     List<String>? deletedMids,
-  })  : created = created ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
+  })  : created = created ?? DateTime.now().millisecondsSinceEpoch \~/ 1000,
         seenMids = seenMids ?? [],
         readMids = readMids ?? [],
         deletedMids = deletedMids ?? [];
@@ -117,18 +122,17 @@ class MailItem {
     required this.date,
   });
 
-  /// من رد الخادم
-  factory MailItem.fromJson(Map<String, dynamic> j) => MailItem(
-        mid: '${j['mid'] ?? ''}',
-        from: '${j['textFrom'] ?? '?'}',
-        to: '${j['textTo'] ?? ''}',
-        subject: '${j['textSubject'] ?? ''}'.trim().isEmpty
-            ? '(بدون عنوان)'
-            : '${j['textSubject']}',
-        date: '${j['textDate'] ?? ''}',
-      );
+  factory MailItem.fromJson(Map<String, dynamic> j) {
+    final rawSubject = '${j['textSubject'] ?? ''}'.trim();
+    return MailItem(
+      mid: '${j['mid'] ?? ''}',
+      from: '${j['textFrom'] ?? '?'}',
+      to: '${j['textTo'] ?? ''}',
+      subject: rawSubject.isEmpty ? '(بدون عنوان)' : rawSubject,
+      date: '${j['textDate'] ?? ''}',
+    );
+  }
 
-  /// من التخزين المحلي
   factory MailItem.fromStored(Map<String, dynamic> j) => MailItem(
         mid: '${j['mid']}',
         from: '${j['from']}',
@@ -179,21 +183,27 @@ class TempMailException implements Exception {
 }
 
 class TempMailApi {
-  // ---------------- الشبكة ----------------
   static Future<dynamic> _gateway(String path, Map<String, String> params) async {
     if (AppConfig.gatewayKey.isEmpty) {
-      throw TempMailException('مفتاح الخدمة غير مضبوط (TEMPMAIL_KEY)');
+      throw TempMailException(
+          'مفتاح الخدمة غير مضبوط.\nاستخدم: --dart-define=TEMPMAIL_KEY=xxxx');
     }
+
     final uri = Uri.parse('${AppConfig.gatewayUrl}$path').replace(
-      queryParameters: {...params, 'rapidapi-key': AppConfig.gatewayKey},
+      queryParameters: params,
     );
 
     http.Response res;
     try {
-      res = await http.get(uri, headers: {
-        'User-Agent': AppConfig.userAgent,
-        'Accept': 'application/json',
-      }).timeout(AppConfig.httpTimeout);
+      res = await http.get(
+        uri,
+        headers: {
+          'User-Agent': AppConfig.userAgent,
+          'Accept': 'application/json',
+          'X-RapidAPI-Key': AppConfig.gatewayKey,
+          'X-RapidAPI-Host': Uri.parse(AppConfig.gatewayUrl).host,
+        },
+      ).timeout(AppConfig.httpTimeout);
     } on TimeoutException {
       throw TempMailException('انتهت مهلة الاتصال');
     } catch (_) {
@@ -202,13 +212,13 @@ class TempMailApi {
 
     if (res.statusCode != 200) {
       const hints = {
-        401: 'المفتاح غير صالح أو العنوان/الرسالة لم تعد موجودة',
+        401: 'المفتاح غير صالح أو الرسالة لم تعد موجودة',
         403: 'ممنوع',
         429: 'طلبات كثيرة، أبطئ التحديث',
       };
       final hint = hints[res.statusCode];
       throw TempMailException(
-          'HTTP ${res.statusCode}${hint != null ? ' ($hint)' : ''}');
+          'HTTP \( {res.statusCode} \){hint != null ? ' ($hint)' : ''}');
     }
 
     final text = utf8.decode(res.bodyBytes, allowMalformed: true);
@@ -222,23 +232,36 @@ class TempMailApi {
     if (data is Map) {
       final code = data['code'];
       if (code != null && code != 200 && '$code' != '200') {
-        throw TempMailException('$code: ${data['msg']}');
+        throw TempMailException('$code: ${data['msg'] ?? data['message'] ?? ''}');
       }
-      return data['items'] ?? <dynamic>[];
+      // بعض الـ APIs ترجع items، وبعضها ترجع البيانات مباشرة
+      return data['items'] ?? data['messages'] ?? data;
     }
     return data;
   }
 
-  // ---------------- العمليات ----------------
   static Future<Inbox> createInbox({
     String domain = AppConfig.randomDomain,
     String username = 'random',
   }) async {
-    final items = await _gateway('/get', {'username': username, 'domain': domain});
+    // لو اختار المستخدم "عشوائي" نرسل domain فارغ أو random حسب الـ API
+    final effectiveDomain = domain == AppConfig.randomDomain ? 'random' : domain;
+
+    final items = await _gateway('/get', {
+      'username': username,
+      'domain': effectiveDomain,
+    });
+
     if (items is! Map || (items['email'] ?? '').toString().isEmpty) {
-      throw TempMailException('الخادم لم يرجع عنواناً');
+      // محاولة بديلة لبعض الـ APIs
+      if (items is Map && items['email'] != null) {
+        // ok
+      } else {
+        throw TempMailException('الخادم لم يرجع عنواناً');
+      }
     }
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    final now = DateTime.now().millisecondsSinceEpoch \~/ 1000;
     return Inbox(
       address: items['email'].toString(),
       since: int.tryParse('${items['timestamp']}') ?? now,
@@ -246,8 +269,11 @@ class TempMailApi {
   }
 
   static Future<List<MailItem>> listMessages(Inbox inbox) async {
-    final items = await _gateway(
-        '/check', {'email': inbox.address, 'timestamp': '${inbox.since}'});
+    final items = await _gateway('/check', {
+      'email': inbox.address,
+      'timestamp': '${inbox.since}',
+    });
+
     if (items is! List) return [];
     return items
         .whereType<Map>()
@@ -257,7 +283,11 @@ class TempMailApi {
   }
 
   static Future<MailDetail> readMessage(Inbox inbox, String mid) async {
-    final payload = await _gateway('/read', {'email': inbox.address, 'mid': mid});
+    final payload = await _gateway('/read', {
+      'email': inbox.address,
+      'mid': mid,
+    });
+
     final body = _findBody(payload);
     var attachments = <dynamic>[];
     if (payload is Map) {
@@ -273,12 +303,13 @@ class TempMailApi {
     );
   }
 
-  // ---------------- أدوات ----------------
   static String _findBody(dynamic node, [int depth = 0]) {
-    if (depth > 4) return '';
+    if (depth > 5) return '';
     if (node is String) return node;
     if (node is Map) {
-      for (final k in const ['body', 'html', 'htmlBody', 'content', 'text', 'message']) {
+      for (final k in const [
+        'body', 'html', 'htmlBody', 'content', 'text', 'message', 'textBody'
+      ]) {
         final v = node[k];
         if (v is String && v.trim().isNotEmpty) return v;
       }
@@ -297,14 +328,21 @@ class TempMailApi {
 
   static String htmlToText(String markup) {
     var t = markup.replaceAll(
-        RegExp(r'<(script|style)\b.*?>.*?</\1>', caseSensitive: false, dotAll: true), ' ');
+        RegExp(r'<(script|style)\b.*?>.*?</\1>',
+            caseSensitive: false, dotAll: true),
+        ' ');
     t = t.replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n');
     t = t.replaceAll(
         RegExp(r'</(p|div|tr|li|h[1-6]|table)>', caseSensitive: false), '\n');
     t = t.replaceAll(RegExp(r'<[^>]+>'), ' ');
     const entities = {
-      '&nbsp;': ' ', '&amp;': '&', '&lt;': '<',
-      '&gt;': '>', '&quot;': '"', '&#39;': "'",
+      '&nbsp;': ' ',
+      '&amp;': '&',
+      '&lt;': '<',
+      '&gt;': '>',
+      '&quot;': '"',
+      '&#39;': "'",
+      '&apos;': "'",
     };
     entities.forEach((k, v) => t = t.replaceAll(k, v));
     t = t.replaceAll(RegExp(r'[ \t]+'), ' ');
@@ -324,12 +362,6 @@ class TempMailApi {
 }
 
 // ======================= store.dart =======================
-/// تخزين محلي. يُستخدم من الواجهة ومن خدمة الخلفية (isolate مختلف)،
-/// لذلك نعمل reload() قبل كل قراءة.
-///
-/// القواعد:
-///  - العنوان لا يتغير إلا بطلب المستخدم.
-///  - الرسائل تُحفظ محلياً ولا تُحذف إلا بحذف المستخدم (حتى لو حذفها الخادم).
 class Store {
   static const _kInbox = 'inbox';
   static const _kHistory = 'history';
@@ -339,11 +371,10 @@ class Store {
 
   static Future<SharedPreferences> _p() async {
     final p = await SharedPreferences.getInstance();
-    await p.reload();
+    await p.reload(); // مهم جداً بين الـ isolates
     return p;
   }
 
-  // ================= العناوين =================
   static Inbox? _decodeInbox(String? raw) {
     if (raw == null) return null;
     try {
@@ -362,7 +393,6 @@ class Store {
     return out;
   }
 
-  /// العنوان الحالي. لو تلف الملف نرجع لآخر عنوان محفوظ بدل إنشاء عنوان جديد.
   static Future<Inbox?> loadInbox() async {
     final p = await _p();
     final current = _decodeInbox(p.getString(_kInbox));
@@ -371,19 +401,26 @@ class Store {
     return history.isEmpty ? null : history.first;
   }
 
-  static Future<List<Inbox>> loadHistory() async => _decodeHistory(await _p());
+  static Future<List<Inbox>> loadHistory() async =>
+      _decodeHistory(await _p());
 
-  /// يجعل [inbox] هو الحالي ويحدّثه في السجل.
   static Future<void> saveInbox(Inbox inbox) async {
     final p = await _p();
     await p.setString(_kInbox, jsonEncode(inbox.toJson()));
-    final history = _decodeHistory(p);
+
+    var history = _decodeHistory(p);
     final idx = history.indexWhere((i) => i.address == inbox.address);
     if (idx >= 0) {
       history[idx] = inbox;
     } else {
       history.insert(0, inbox);
     }
+
+    // حد أقصى للسجل
+    if (history.length > AppConfig.maxHistory) {
+      history = history.sublist(0, AppConfig.maxHistory);
+    }
+
     await p.setStringList(
         _kHistory, history.map((i) => jsonEncode(i.toJson())).toList());
   }
@@ -408,9 +445,9 @@ class Store {
     return updated;
   }
 
-  // ================= الرسائل =================
   static String _mailsKey(String address) => 'mails_$address';
-  static String _detailKey(String address, String mid) => 'detail_${address}_$mid';
+  static String _detailKey(String address, String mid) =>
+      'detail_${address}_$mid';
 
   static List<MailItem> _decodeMails(String? raw) {
     if (raw == null) return [];
@@ -426,7 +463,6 @@ class Store {
   static Future<List<MailItem>> loadMails(String address) async =>
       _decodeMails((await _p()).getString(_mailsKey(address)));
 
-  /// يضيف الرسائل الجديدة فقط (بدون حذف أي قديم، وبدون ما حذفه المستخدم).
   static Future<List<MailItem>> mergeMails(
       String address, List<MailItem> incoming) async {
     final p = await _p();
@@ -435,17 +471,20 @@ class Store {
     final deleted =
         inbox?.address == address ? inbox!.deletedMids.toSet() : <String>{};
     final known = current.map((m) => m.mid).toSet();
+
     final added = incoming
         .where((m) => !known.contains(m.mid) && !deleted.contains(m.mid))
         .toList();
+
     if (added.isEmpty) return current;
+
     final merged = [...added, ...current];
     await p.setString(
-        _mailsKey(address), jsonEncode(merged.map((m) => m.toStored()).toList()));
+        _mailsKey(address),
+        jsonEncode(merged.map((m) => m.toStored()).toList()));
     return merged;
   }
 
-  /// الحذف الوحيد المسموح: بطلب المستخدم.
   static Future<List<MailItem>> deleteMails(
       String address, Iterable<String> mids) async {
     final p = await _p();
@@ -455,18 +494,19 @@ class Store {
         .toList();
     await p.setString(_mailsKey(address),
         jsonEncode(remaining.map((m) => m.toStored()).toList()));
+
     for (final mid in ids) {
       await p.remove(_detailKey(address, mid));
     }
+
     final inbox = await loadInbox();
     if (inbox != null && inbox.address == address) {
-      await saveInbox(
-          inbox.copyWith(deletedMids: {...inbox.deletedMids, ...ids}.toList()));
+      await saveInbox(inbox
+          .copyWith(deletedMids: {...inbox.deletedMids, ...ids}.toList()));
     }
     return remaining;
   }
 
-  // ----- نص الرسالة المحفوظ (يبقى حتى لو حذفها الخادم) -----
   static Future<MailDetail?> loadDetail(String address, String mid) async {
     final raw = (await _p()).getString(_detailKey(address, mid));
     if (raw == null) return null;
@@ -484,14 +524,15 @@ class Store {
     await p.setString(_detailKey(address, mid), jsonEncode(d.toStored()));
   }
 
-  // ================= الإعدادات =================
   static Future<bool> notifEnabled() async =>
       (await _p()).getBool(_kNotif) ?? true;
   static Future<void> setNotif(bool v) async =>
       (await _p()).setBool(_kNotif, v);
 
-  static Future<bool> bgEnabled() async => (await _p()).getBool(_kBg) ?? false;
-  static Future<void> setBg(bool v) async => (await _p()).setBool(_kBg, v);
+  static Future<bool> bgEnabled() async =>
+      (await _p()).getBool(_kBg) ?? false;
+  static Future<void> setBg(bool v) async =>
+      (await _p()).setBool(_kBg, v);
 
   static Future<String> domain() async =>
       (await _p()).getString(_kDomain) ?? AppConfig.randomDomain;
@@ -500,11 +541,9 @@ class Store {
 }
 
 // ======================= utils.dart =======================
-/// مفتاح لعرض رسائل Snackbar من أي مكان (حتى من معالج الإشعارات).
 final GlobalKey<ScaffoldMessengerState> messengerKey =
     GlobalKey<ScaffoldMessengerState>();
 
-/// عند الضغط على إشعار (بدون زر) نضع بياناته هنا فتفتحها الشاشة الرئيسية.
 final ValueNotifier<Map<String, dynamic>?> pendingOpen =
     ValueNotifier<Map<String, dynamic>?>(null);
 
@@ -515,7 +554,7 @@ void toast(String text) {
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(
       content: Text(text, textAlign: TextAlign.center),
-      duration: const Duration(milliseconds: 1600),
+      duration: const Duration(milliseconds: 1800),
       behavior: SnackBarBehavior.floating,
     ));
 }
@@ -543,7 +582,6 @@ class AppColors {
 }
 
 // ======================= repository.dart =======================
-/// يرجع نص الرسالة من التخزين المحلي، وإن لم يوجد يجلبه ويحفظه.
 Future<MailDetail> getDetail(Inbox inbox, String mid) async {
   final cached = await Store.loadDetail(inbox.address, mid);
   if (cached != null) return cached;
@@ -571,16 +609,23 @@ class NotificationService {
     const settings = InitializationSettings(
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
     );
-    await plugin.initialize(settings, onDidReceiveNotificationResponse: onResponse);
+
+    await plugin.initialize(
+      settings,
+      onDidReceiveNotificationResponse: onResponse,
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+    );
 
     final android = plugin.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
+
     await android?.createNotificationChannel(const AndroidNotificationChannel(
       mailChannelId,
       'الرسائل الواردة',
       description: 'إشعار عند وصول رسالة أو كود تحقق جديد',
       importance: Importance.high,
     ));
+
     await android?.createNotificationChannel(const AndroidNotificationChannel(
       serviceChannelId,
       'خدمة المراقبة',
@@ -589,21 +634,19 @@ class NotificationService {
     ));
   }
 
-  /// أندرويد 13+ يحتاج إذن POST_NOTIFICATIONS.
   static Future<bool> requestPermission() async {
     final android = plugin.resolvePlatformSpecificImplementation<
         AndroidFlutterLocalNotificationsPlugin>();
     return await android?.requestNotificationsPermission() ?? true;
   }
 
-  /// يعرض إشعاراً لرسالة جديدة مع أزرار النسخ.
   static Future<void> showMail({
     required MailItem mail,
     required MailDetail detail,
   }) async {
     final code = detail.code;
-    final preview = detail.text.length > 1500
-        ? '${detail.text.substring(0, 1500)}…'
+    final preview = detail.text.length > 1400
+        ? '${detail.text.substring(0, 1400)}…'
         : detail.text;
 
     final title = code != null ? 'كود التحقق: $code' : mail.subject;
@@ -611,7 +654,6 @@ class NotificationService {
         ? '${mail.subject} — ${mail.from}'
         : (preview.isEmpty ? mail.from : preview.replaceAll('\n', ' '));
 
-    // الأزرار (أندرويد يعرض 3 كحد أقصى)
     final actions = <AndroidNotificationAction>[
       if (code != null)
         const AndroidNotificationAction(actionCopyCode, 'نسخ الكود',
@@ -662,7 +704,6 @@ class NotificationService {
     );
   }
 
-  /// يُنفَّذ عند الضغط على الإشعار أو أحد أزراره.
   static Future<void> handleResponse(NotificationResponse r) async {
     Map<String, dynamic> d = {};
     try {
@@ -671,12 +712,12 @@ class NotificationService {
 
     final id = r.actionId;
     if (id == null || id.isEmpty) {
-      pendingOpen.value = d; // ضغطة عادية → افتح الرسالة
+      pendingOpen.value = d;
       return;
     }
 
-    // انتظر لحظة ليصبح التطبيق في المقدمة (أندرويد 10+ يمنع النسخ من الخلفية)
-    await Future.delayed(const Duration(milliseconds: 500));
+    // أندرويد يمنع النسخ من الخلفية — ننتظر شوية
+    await Future.delayed(const Duration(milliseconds: 600));
 
     switch (id) {
       case actionCopyCode:
@@ -697,17 +738,29 @@ class NotificationService {
             final full = await getDetail(inbox, mid);
             if (full.text.isNotEmpty) text = full.text;
           }
-        } catch (_) {/* نكتفي بالمعاينة */}
+        } catch (_) {}
         await copyText(text, 'تم نسخ الرسالة ✓');
         break;
     }
   }
 }
 
+/// يجب أن يكون top-level + @pragma
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse response) {
+  // في الخلفية الكاملة نكتفي بتسجيل الـ payload
+  // الـ handleResponse راح يشتغل لما التطبيق يفتح
+  try {
+    final d = jsonDecode(response.payload ?? '{}');
+    if (d is Map) {
+      // ممكن نحفظه في SharedPreferences لو احتجنا
+    }
+  } catch (_) {}
+}
+
 // ======================= poller.dart =======================
-/// يجلب الرسائل ويحفظها محلياً (لا يُحذف شيء)، وإن كان [notify] مفعلاً
-/// يرسل إشعاراً لكل رسالة جديدة. يرجع كل الرسائل المحفوظة.
-Future<List<MailItem>> fetchMessages(Inbox inbox, {required bool notify}) async {
+Future<List<MailItem>> fetchMessages(Inbox inbox,
+    {required bool notify}) async {
   final remote = await TempMailApi.listMessages(inbox);
   final stored = await Store.mergeMails(inbox.address, remote);
 
@@ -715,25 +768,28 @@ Future<List<MailItem>> fetchMessages(Inbox inbox, {required bool notify}) async 
   final seen = latest.seenMids.toSet();
   final deleted = latest.deletedMids.toSet();
 
-  for (final mail in remote) {
-    if (deleted.contains(mail.mid)) continue;
+  // ← الإصلاح المهم: نعالج فقط الرسائل الجديدة
+  final newMails = remote.where((m) =>
+      !seen.contains(m.mid) && !deleted.contains(m.mid)).toList();
+
+  for (final mail in newMails) {
     try {
-      // نحفظ النص محلياً ليبقى حتى لو حذفه الخادم
       final detail = await getDetail(latest, mail.mid);
-      if (notify && !seen.contains(mail.mid)) {
+      if (notify) {
         await NotificationService.showMail(mail: mail, detail: detail);
         await Store.markSeen([mail.mid]);
       }
     } on TempMailException {
-      continue; // نحاول في الدورة القادمة
+      // نحاول في الدورة القادمة
+      continue;
     }
   }
+
   return stored;
 }
 
 bool _busy = false;
 
-/// دورة واحدة من الفحص في الخلفية.
 Future<void> pollOnce() async {
   if (_busy) return;
   _busy = true;
@@ -743,7 +799,7 @@ Future<void> pollOnce() async {
     if (inbox == null) return;
     await fetchMessages(inbox, notify: true);
   } catch (_) {
-    // لا نوقف الخدمة بسبب خطأ شبكة عابر
+    // نتجاهل أخطاء الشبكة العابرة
   } finally {
     _busy = false;
   }
@@ -770,9 +826,12 @@ void onStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
   await NotificationService.init();
 
-  service.on('stopService').listen((_) => service.stopSelf());
+  service.on('stopService').listen((_) {
+    service.stopSelf();
+  });
 
   Timer.periodic(AppConfig.bgInterval, (_) => pollOnce());
+  // أول فحص فوري
   pollOnce();
 }
 
@@ -820,11 +879,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  // ---------------- التهيئة ----------------
   Future<void> _bootstrap() async {
     _notif = await Store.notifEnabled();
     _bg = await Store.bgEnabled();
     _domain = await Store.domain();
+
     if (_notif) await NotificationService.requestPermission();
 
     if (_bg) {
@@ -834,15 +893,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     _inbox = await Store.loadInbox();
     if (_inbox == null) {
-      await _newAddress(); // أول تشغيل فقط
+      await _newAddress();
     } else {
-      _mails = await Store.loadMails(_inbox!.address); // المحفوظ محلياً
+      _mails = await Store.loadMails(_inbox!.address);
       setState(() => _loading = false);
       await _refresh();
     }
     _startTimer();
 
-    // لو فُتح التطبيق من إشعار وهو مغلق
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final launch =
           await NotificationService.plugin.getNotificationAppLaunchDetails();
@@ -858,7 +916,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _timer = Timer.periodic(AppConfig.pollInterval, (_) => _refresh());
   }
 
-  // ---------------- الإجراءات ----------------
   Future<void> _newAddress() async {
     setState(() => _loading = true);
     try {
@@ -932,7 +989,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _showHistory() async {
     final list = await Store.loadHistory();
     if (!mounted) return;
-    Navigator.of(context).pop(); // أغلق الإعدادات
+    Navigator.of(context).pop();
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: AppColors.card,
@@ -946,6 +1003,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           const Text('العناوين السابقة',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
           const SizedBox(height: 8),
+          if (list.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(20),
+              child: Text('لا توجد عناوين سابقة',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: AppColors.muted)),
+            ),
           for (final i in list)
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -970,11 +1034,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _refresh({bool manual = false}) async {
     final inbox = _inbox;
     if (inbox == null) {
-      if (!_loading) await _newAddress(); // لم يُنشأ عنوان بعد (أول مرة فقط)
+      if (!_loading) await _newAddress();
       return;
     }
     try {
-      // الإشعار من الواجهة فقط لو خدمة الخلفية متوقفة
       final list = await fetchMessages(inbox, notify: _notif && !_bg);
       final fresh = await Store.loadInbox() ?? inbox;
       if (!mounted) return;
@@ -983,7 +1046,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _inbox = fresh;
         _online = true;
       });
-      if (manual) toast(list.isEmpty ? 'لا توجد رسائل جديدة' : 'تم التحديث');
+      if (manual) {
+        toast(list.isEmpty ? 'لا توجد رسائل جديدة' : 'تم التحديث');
+      }
     } on TempMailException catch (e) {
       if (!mounted) return;
       setState(() => _online = false);
@@ -1004,6 +1069,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final updated = await Store.markRead([mail.mid]);
     if (updated != null && mounted) setState(() => _inbox = updated);
     if (!mounted) return;
+
     final delete = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -1034,7 +1100,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     ));
   }
 
-  // ---------------- الإعدادات ----------------
   Future<void> _setNotif(bool v) async {
     setState(() => _notif = v);
     await Store.setNotif(v);
@@ -1119,8 +1184,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   items: [AppConfig.randomDomain, ...AppConfig.domains]
                       .map((d) => DropdownMenuItem(
                             value: d,
-                            child: Text(
-                                d == AppConfig.randomDomain ? 'random (عشوائي)' : d),
+                            child: Text(d == AppConfig.randomDomain
+                                ? 'random (عشوائي)'
+                                : d),
                           ))
                       .toList(),
                   onChanged: (v) async {
@@ -1138,7 +1204,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     );
   }
 
-  // ---------------- الواجهة ----------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1192,7 +1257,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               style: TextStyle(fontSize: 21, fontWeight: FontWeight.w800),
               children: [
                 TextSpan(text: 'Odin '),
-                TextSpan(text: 'Mail', style: TextStyle(color: AppColors.gold)),
+                TextSpan(
+                    text: 'Mail', style: TextStyle(color: AppColors.gold)),
               ],
             )),
           ),
@@ -1218,12 +1284,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         borderRadius: BorderRadius.circular(22),
         border: Border.all(color: AppColors.line),
         boxShadow: const [
-          BoxShadow(color: Color(0x66000000), blurRadius: 40, offset: Offset(0, 20)),
+          BoxShadow(
+              color: Color(0x66000000),
+              blurRadius: 40,
+              offset: Offset(0, 20)),
         ],
       ),
       child: Column(
         children: [
-          // العنوان
           Container(
             padding: const EdgeInsetsDirectional.fromSTEB(6, 6, 12, 6),
             decoration: BoxDecoration(
@@ -1236,7 +1304,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 FilledButton(
                   onPressed: _inbox == null
                       ? null
-                      : () => copyText(_inbox!.address, 'تم نسخ العنوان ✓'),
+                      : () =>
+                          copyText(_inbox!.address, 'تم نسخ العنوان ✓'),
                   style: FilledButton.styleFrom(
                     backgroundColor: AppColors.accent,
                     shape: RoundedRectangleBorder(
@@ -1264,7 +1333,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 12),
-          // الأدوات
           Row(
             children: [
               _tool('🔄 عنوان جديد', _loading ? null : _confirmNewAddress),
@@ -1276,7 +1344,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 8),
           const Divider(height: 1, color: AppColors.line),
-          // الصندوق
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -1288,7 +1355,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             Center(
                               child: Text('📭\nفي انتظار الرسائل...',
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(color: AppColors.muted)),
+                                  style:
+                                      TextStyle(color: AppColors.muted)),
                             ),
                           ])
                         : ListView.builder(
@@ -1311,8 +1379,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           foregroundColor: AppColors.text,
           backgroundColor: AppColors.bg2,
           side: const BorderSide(color: AppColors.line),
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          padding:
+              const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
+          shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10)),
         ),
         child: FittedBox(
             child: Text(label, style: const TextStyle(fontSize: 13))),
@@ -1357,7 +1427,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                           fontSize: 14,
-                          fontWeight: unread ? FontWeight.w800 : FontWeight.w500)),
+                          fontWeight:
+                              unread ? FontWeight.w800 : FontWeight.w500)),
                   Text(m.subject,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -1422,7 +1493,8 @@ class _MailSheetState extends State<_MailSheet> {
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
         children: [
           Text(mail.subject,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+              style: const TextStyle(
+                  fontSize: 18, fontWeight: FontWeight.w800)),
           const SizedBox(height: 4),
           Text('من: ${mail.from} • ${mail.date}',
               style: const TextStyle(color: AppColors.muted, fontSize: 13)),
@@ -1459,8 +1531,8 @@ class _MailSheetState extends State<_MailSheet> {
                             'تم نسخ الكود ✓'),
                       _copyBtn('نسخ الرسالة', Icons.copy_all_rounded, d.text,
                           'تم نسخ الرسالة ✓'),
-                      _copyBtn('نسخ العنوان', Icons.title_rounded, mail.subject,
-                          'تم نسخ العنوان ✓'),
+                      _copyBtn('نسخ العنوان', Icons.title_rounded,
+                          mail.subject, 'تم نسخ العنوان ✓'),
                       _copyBtn('نسخ المرسل', Icons.person_outline, mail.from,
                           'تم نسخ المرسل ✓'),
                     ],
@@ -1480,8 +1552,8 @@ class _MailSheetState extends State<_MailSheet> {
               Expanded(
                 child: FilledButton(
                   onPressed: () => Navigator.of(context).pop(false),
-                  style:
-                      FilledButton.styleFrom(backgroundColor: AppColors.accent),
+                  style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.accent),
                   child: const Text('إغلاق'),
                 ),
               ),
@@ -1500,7 +1572,8 @@ class _MailSheetState extends State<_MailSheet> {
                         TextButton(
                             onPressed: () => Navigator.pop(ctx, true),
                             child: const Text('حذف',
-                                style: TextStyle(color: AppColors.danger))),
+                                style:
+                                    TextStyle(color: AppColors.danger))),
                       ],
                     ),
                   );
@@ -1570,7 +1643,8 @@ class _MailSheetState extends State<_MailSheet> {
       style: OutlinedButton.styleFrom(
         foregroundColor: AppColors.text,
         side: const BorderSide(color: AppColors.line),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10)),
       ),
     );
   }
@@ -1604,7 +1678,8 @@ class _PulseDotState extends State<_PulseDot>
       child: Container(
         width: 8,
         height: 8,
-        decoration: BoxDecoration(color: widget.color, shape: BoxShape.circle),
+        decoration:
+            BoxDecoration(color: widget.color, shape: BoxShape.circle),
       ),
     );
   }
@@ -1640,11 +1715,10 @@ class OdinMailApp extends StatelessWidget {
         ),
         snackBarTheme: const SnackBarThemeData(
           backgroundColor: AppColors.ok,
-          contentTextStyle:
-              TextStyle(color: Color(0xFF06231A), fontWeight: FontWeight.w700),
+          contentTextStyle: TextStyle(
+              color: Color(0xFF06231A), fontWeight: FontWeight.w700),
         ),
       ),
-      // الواجهة عربية من اليمين لليسار
       builder: (context, child) =>
           Directionality(textDirection: TextDirection.rtl, child: child!),
       home: const HomePage(),

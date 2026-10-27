@@ -4,29 +4,22 @@ publish_to: "none"
 version: 1.0.0+1
 
 environment:
-  sdk: ">=3.2.0 <4.0.0"   # Flutter 3.16 = Dart 3.2
+  sdk: ">=3.2.0 <4.0.0"
 
 dependencies:
   flutter:
     sdk: flutter
-  cupertino_icons: ^1.0.6
+  cupertino_icons: ^1.0.8
 
-  # الاتصال بالإنترنت (طلبات HTTP)
-  http: ^1.1.2
-
-  # حفظ الصندوق والإعدادات محلياً
-  shared_preferences: ^2.2.2
-
-  # الإشعارات + أزرار النسخ داخل الإشعار
-  flutter_local_notifications: ^16.3.2
-
-  # الفحص في الخلفية (خدمة Foreground) لاستقبال الرسائل والتطبيق مغلق
-  flutter_background_service: ^5.0.5
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  flutter_local_notifications: ^17.2.3
+  flutter_background_service: ^5.0.6
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^3.0.1
+  flutter_lints: ^4.0.0
 
 flutter:
   uses-material-design: true
