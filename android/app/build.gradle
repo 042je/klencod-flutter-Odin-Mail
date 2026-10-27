@@ -23,13 +23,14 @@ if (flutterVersionName == null) {
 }
 
 android {
-    namespace = "Mail.example.com"
+    namespace = "Odin.example.com"
     compileSdk = 36
-    ndkVersion = flutter.ndkVersion
+    ndkVersion = "27.0.12077973"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -37,11 +38,12 @@ android {
     }
 
     defaultConfig {
-        applicationId = "Mail.example.com"
+        applicationId = "Odin.example.com"
         minSdk = 24
         targetSdk = 34
         versionCode = flutterVersionCode.toInteger()
         versionName = flutterVersionName
+        multiDexEnabled = true
     }
 
     buildTypes {
@@ -53,4 +55,8 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"
 }
